@@ -11,6 +11,7 @@ const DEFAULT_OWNER = 'phetsims';
 const CHIPPER = 'chipper';
 const PERENNIAL_ALIAS = 'perennial-alias';
 const PERENNIAL_REPO = 'perennial';
+const TOOLING_BRANCH = 'packagelock-umbrella-1';
 
 const commands = {
   'add-sim': addSim,
@@ -48,27 +49,88 @@ function addSim( simName ) {
 
   const manifest = loadManifest();
   const config = resolveSimConfig( manifest, simName );
+  const liveRepo = config.liveRepo;
 
+  // Step 1: Fetch base tooling (chipper, perennial-alias) using the special branch with package-lock.json
   log( `Fetching base tooling (${CHIPPER}, ${PERENNIAL_ALIAS})...` );
-  ensureZipRepo( CHIPPER );
+  ensureZipRepo( CHIPPER, DEFAULT_OWNER, CHIPPER, TOOLING_BRANCH );
   npmInstallIfNeeded( CHIPPER );
-  ensureZipRepo( PERENNIAL_REPO, DEFAULT_OWNER, PERENNIAL_ALIAS );
+  ensureZipRepo( PERENNIAL_REPO, DEFAULT_OWNER, PERENNIAL_ALIAS, TOOLING_BRANCH );
   npmInstallIfNeeded( PERENNIAL_ALIAS );
 
-  const deps = Array.isArray( config.deps ) ? config.deps : [];
-  const allZipRepos = new Set( deps );
+  // Step 2: Read common.phetLibs from chipper/build.json
+  const commonPhetLibs = readCommonPhetLibs();
 
-  if ( config.liveRepo === simName ) {
-    ensureLiveRepo( simName );
+  // Step 3: Fetch the sim itself (need it to read its package.json for phetLibs)
+  // If liveRepo is different from simName, fetch sim as zip first
+  if ( liveRepo !== simName ) {
+    ensureZipRepo( simName );
   }
   else {
-    ensureZipRepo( simName );
-    allZipRepos.add( simName );
-    ensureLiveRepo( config.liveRepo );
+    ensureLiveRepo( simName );
   }
 
-  allZipRepos.forEach( ( repo ) => ensureZipRepo( repo ) );
-  log( `Done. Live repo: ${config.liveRepo}. Zip repos: ${Array.from( allZipRepos ).join( ', ' ) || 'none'}.` );
+  // Step 4: Read sim's phet.phetLibs from its package.json
+  const simPhetLibs = readSimPhetLibs( simName );
+
+  // Step 5: Combine all dependencies (common + sim-specific), excluding already-handled repos
+  const excludeFromZip = new Set( [ CHIPPER, PERENNIAL_ALIAS, PERENNIAL_REPO, simName, liveRepo ] );
+  const allDeps = new Set( [ ...commonPhetLibs, ...simPhetLibs ] );
+
+  // Step 6: Ensure liveRepo is cloned (if different from sim)
+  if ( liveRepo !== simName ) {
+    ensureLiveRepo( liveRepo );
+    // Also need to fetch liveRepo's phetLibs if it has any
+    const liveRepoPhetLibs = readSimPhetLibs( liveRepo );
+    liveRepoPhetLibs.forEach( dep => allDeps.add( dep ) );
+  }
+
+  // Step 7: Download all remaining deps as zips
+  const zipRepos = [];
+  allDeps.forEach( ( repo ) => {
+    if ( !excludeFromZip.has( repo ) ) {
+      ensureZipRepo( repo );
+      zipRepos.push( repo );
+    }
+  } );
+
+  log( `Done. Live repo: ${liveRepo}. Zip repos: ${zipRepos.join( ', ' ) || 'none'}.` );
+}
+
+function readCommonPhetLibs() {
+  const buildJsonPath = path.join( REPOS_DIR, CHIPPER, 'build.json' );
+  if ( !fs.existsSync( buildJsonPath ) ) {
+    log( 'Warning: chipper/build.json not found, using empty common phetLibs.' );
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync( buildJsonPath, 'utf8' );
+    const buildJson = JSON.parse( content );
+    return Array.isArray( buildJson?.common?.phetLibs ) ? buildJson.common.phetLibs : [];
+  }
+  catch ( err ) {
+    log( `Warning: could not read chipper/build.json (${err.message}).` );
+    return [];
+  }
+}
+
+function readSimPhetLibs( repoName ) {
+  const packageJsonPath = path.join( REPOS_DIR, repoName, 'package.json' );
+  if ( !fs.existsSync( packageJsonPath ) ) {
+    log( `Warning: ${repoName}/package.json not found, using empty phetLibs.` );
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync( packageJsonPath, 'utf8' );
+    const packageJson = JSON.parse( content );
+    return Array.isArray( packageJson?.phet?.phetLibs ) ? packageJson.phet.phetLibs : [];
+  }
+  catch ( err ) {
+    log( `Warning: could not read ${repoName}/package.json (${err.message}).` );
+    return [];
+  }
 }
 
 function statusAll() {
@@ -113,20 +175,19 @@ function pushAll() {
   } );
 }
 
-function ensureZipRepo( repoName, owner = DEFAULT_OWNER, destName = repoName ) {
+function ensureZipRepo( repoName, owner = DEFAULT_OWNER, destName = repoName, branch = null ) {
   const dest = path.join( REPOS_DIR, destName );
   if ( fs.existsSync( dest ) ) {
     log( `${destName} already present (zip).` );
     return;
   }
 
-  // Prefer archive URLs for reliability with anonymous downloads; fallback to zipball.
-  const candidates = [
-    `https://github.com/${owner}/${repoName}/archive/refs/heads/main.zip`,
-    `https://github.com/${owner}/${repoName}/archive/refs/heads/master.zip`,
-    `https://api.github.com/repos/${owner}/${repoName}/zipball/main`,
-    `https://api.github.com/repos/${owner}/${repoName}/zipball/master`
-  ];
+  // If a specific branch is provided, try only that branch; otherwise try main then master.
+  const branches = branch ? [ branch ] : [ 'main', 'master' ];
+  const candidates = branches.flatMap( b => [
+    `https://github.com/${owner}/${repoName}/archive/refs/heads/${b}.zip`,
+    `https://api.github.com/repos/${owner}/${repoName}/zipball/${b}`
+  ] );
 
   const tmpRoot = fs.mkdtempSync( path.join( os.tmpdir(), 'umbrella-' ) );
   const zipPath = path.join( tmpRoot, `${repoName}.zip` );
@@ -197,8 +258,12 @@ function npmInstallIfNeeded( name ) {
     log( `npm install already completed in ${name}.` );
     return;
   }
-  log( `Running npm install in ${name}...` );
-  run( 'npm', [ 'install' ], { cwd: dir }, `npm install failed in ${name}` );
+
+  // Use npm ci for faster, reproducible installs when package-lock.json exists
+  const hasLockfile = fs.existsSync( path.join( dir, 'package-lock.json' ) );
+  const npmCommand = hasLockfile ? 'ci' : 'install';
+  log( `Running npm ${npmCommand} in ${name}...` );
+  run( 'npm', [ npmCommand ], { cwd: dir }, `npm ${npmCommand} failed in ${name}` );
 }
 
 function findGitRepos() {
