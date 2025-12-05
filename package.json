@@ -1,0 +1,27 @@
+{
+  "name": "umbrella",
+  "version": "0.1.0",
+  "description": "Harness repo for PhET development that clones sims and common code into one workspace.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "node scripts/manage.js install-all",
+    "add-sim": "node scripts/manage.js add-sim",
+    "remove-sim": "node scripts/manage.js remove-sim",
+    "list-sims": "node scripts/manage.js list-sims",
+    "install-all": "node scripts/manage.js install-all",
+    "pull-all": "node scripts/manage.js pull-all",
+    "push-all": "node scripts/manage.js push-all",
+    "status-all": "node scripts/manage.js status-all",
+    "clean-all": "node scripts/manage.js clean-all",
+    "start": "node scripts/manage.js start"
+  },
+  "keywords": [
+    "phet",
+    "sims",
+    "chipper",
+    "perennial"
+  ],
+  "author": "Sam Reid (PhET Interactive Simulations)",
+  "type": "commonjs"
+}
