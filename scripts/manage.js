@@ -16,7 +16,8 @@ const commands = {
   'add-sim': addSim,
   status: statusAll,
   pull: pullAll,
-  push: pushAll
+  push: pushAll,
+  'ensure-entr': ensureEntr
 };
 
 main();
@@ -31,7 +32,8 @@ function main() {
         '  npm run add-sim -- <sim>',
         '  npm run status',
         '  npm run pull',
-        '  npm run push'
+        '  npm run push',
+        '  node scripts/manage.js ensure-entr'
       ].join( '\n' )
     );
     process.exit( 1 );
@@ -172,6 +174,33 @@ function pushAll() {
     log( `Pushing ${name}...` );
     run( 'git', [ 'push' ], { cwd: repoPath }, `git push failed in ${name}` );
   } );
+}
+
+function ensureEntr() {
+  const hasEntr = spawnSync( 'sh', [ '-c', 'command -v entr' ], { stdio: 'ignore' } ).status === 0;
+  if ( hasEntr ) {
+    log( 'entr already available.' );
+    return;
+  }
+
+  const hasApt = spawnSync( 'sh', [ '-c', 'command -v apt-get' ], { stdio: 'ignore' } ).status === 0;
+  if ( !hasApt ) {
+    log( 'entr not found and apt-get not available; please install entr manually.' );
+    return;
+  }
+
+  log( 'Installing entr via apt-get (requires sudo)...' );
+  const update = spawnSync( 'sudo', [ 'apt-get', 'update' ], { stdio: 'inherit' } );
+  if ( update.status !== 0 ) {
+    log( 'apt-get update failed; please install entr manually.' );
+    return;
+  }
+  const install = spawnSync( 'sudo', [ 'apt-get', 'install', '-y', 'entr' ], { stdio: 'inherit' } );
+  if ( install.status !== 0 ) {
+    log( 'apt-get install entr failed; please install manually.' );
+    return;
+  }
+  log( 'entr installed.' );
 }
 
 function ensureZipRepo( repoName, owner = DEFAULT_OWNER, destName = repoName, branch = null ) {

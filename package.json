@@ -5,7 +5,7 @@
   "private": true,
   "license": "MIT",
   "scripts": {
-    "postinstall": "node scripts/postinstall-message.js",
+    "postinstall": "node scripts/manage.js ensure-entr && node scripts/postinstall-message.js",
     "add-sim": "node scripts/manage.js add-sim",
     "status": "node scripts/manage.js status",
     "pull": "node scripts/manage.js pull",
