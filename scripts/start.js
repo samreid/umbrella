@@ -17,17 +17,23 @@ function ensureExists(dir, hint) {
 ensureExists(CHIPPER, 'Run npm install, then npm run add-sim to clone required repos.');
 ensureExists(PERENNIAL_ALIAS, 'Run npm install to clone perennial-alias.');
 
+console.log('Starting watch-strings...');
 const watch = spawn('./bin/watch-strings.zsh', {
   cwd: PERENNIAL_ALIAS,
   stdio: 'inherit',
   shell: true
 });
 
-const devServer = spawn('npm', ['exec', 'grunt', 'dev-server', '--', '--port=8123'], {
-  cwd: CHIPPER,
-  stdio: 'ignore',
-  shell: false
-});
+console.log('Starting chipper dev-server on port 8123...');
+const devServer = spawn(
+  'npm',
+  ['exec', 'grunt', 'dev-server', '--', '--port=8123'],
+  {
+    cwd: CHIPPER,
+    stdio: 'inherit',
+    shell: false
+  }
+);
 
 function shutdown(code = 0) {
   devServer.kill('SIGTERM');
