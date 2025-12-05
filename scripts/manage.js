@@ -1,25 +1,22 @@
 #!/usr/bin/env node
 const fs = require( 'fs' );
+const os = require( 'os' );
 const path = require( 'path' );
 const { spawnSync } = require( 'child_process' );
 
 const ROOT = path.resolve( __dirname, '..' );
 const REPOS_DIR = path.join( ROOT, 'repos' );
-const INSTALLED_FILE = path.join( ROOT, 'installed-sims.json' );
+const SIMS_MANIFEST = path.join( ROOT, 'sims.json' );
+const DEFAULT_OWNER = 'phetsims';
 const CHIPPER = 'chipper';
 const PERENNIAL_ALIAS = 'perennial-alias';
 const PERENNIAL_REPO = 'perennial';
 
 const commands = {
   'add-sim': addSim,
-  'remove-sim': removeSim,
-  'list-sims': listSims,
-  'install-all': installAll,
-  'pull-all': pullAll,
-  'push-all': pushAll,
-  'status-all': statusAll,
-  'clean-all': cleanAll,
-  'ensure-entr': ensureEntr
+  status: statusAll,
+  pull: pullAll,
+  push: pushAll
 };
 
 main();
@@ -27,26 +24,19 @@ main();
 function main() {
   const [ , , cmd, ...args ] = process.argv;
   const action = commands[ cmd ];
-
   if ( !action ) {
     log(
       [
         'Usage:',
         '  npm run add-sim -- <sim>',
-        '  npm run remove-sim -- <sim>',
-        '  npm run list-sims',
-        '  npm run install-all',
-        '  npm run pull-all',
-        '  npm run push-all',
-        '  npm run status-all',
-        '  npm run clean-all',
-        '  npm run ensure-entr'
+        '  npm run status',
+        '  npm run pull',
+        '  npm run push'
       ].join( '\n' )
     );
     process.exit( 1 );
   }
 
-  ensureInstalledFile();
   fs.mkdirSync( REPOS_DIR, { recursive: true } );
   action( ...args );
 }
@@ -56,254 +46,204 @@ function addSim( simName ) {
     exitWithError( 'add-sim requires a sim name, e.g. npm run add-sim -- circuit-construction-kit-dc' );
   }
 
-  log( `Adding sim ${simName}...` );
-  ensureBaseRepos();
-  ensureCommonLibs();
-  ensureSimAndLibs( simName );
+  const manifest = loadManifest();
+  const config = resolveSimConfig( manifest, simName );
 
-  const installed = readInstalled();
-  if ( !installed.includes( simName ) ) {
-    installed.push( simName );
-    writeInstalled( installed );
+  log( `Fetching base tooling (${CHIPPER}, ${PERENNIAL_ALIAS})...` );
+  ensureZipRepo( CHIPPER );
+  npmInstallIfNeeded( CHIPPER );
+  ensureZipRepo( PERENNIAL_REPO, DEFAULT_OWNER, PERENNIAL_ALIAS );
+  npmInstallIfNeeded( PERENNIAL_ALIAS );
+
+  const deps = Array.isArray( config.deps ) ? config.deps : [];
+  const allZipRepos = new Set( deps );
+
+  if ( config.liveRepo === simName ) {
+    ensureLiveRepo( simName );
+  }
+  else {
+    ensureZipRepo( simName );
+    allZipRepos.add( simName );
+    ensureLiveRepo( config.liveRepo );
   }
 
-  log( `Sim ${simName} added. Installed sims: ${readInstalled().join( ', ' ) || 'none'}` );
-}
-
-function removeSim( simName ) {
-  if ( !simName ) {
-    exitWithError( 'remove-sim requires a sim name, e.g. npm run remove-sim -- circuit-construction-kit-dc' );
-  }
-
-  log( `Removing sim ${simName} and pruning unused repos...` );
-  const installed = readInstalled();
-  const next = installed.filter( ( name ) => name !== simName );
-  writeInstalled( next );
-
-  const requiredRepos = computeRequiredRepos( next );
-  pruneRepos( requiredRepos );
-
-  log( `Remaining sims: ${next.join( ', ' ) || 'none'}` );
-}
-
-function listSims() {
-  const installed = readInstalled();
-  if ( !installed.length ) {
-    log( 'No sims installed. Try: npm run add-sim -- <sim>' );
-    return;
-  }
-  log( `Installed sims:\n- ${installed.join( '\n- ' )}` );
-}
-
-function installAll() {
-  log( 'Ensuring base repos, common libs, and installs for all tracked sims...' );
-  ensureBaseRepos();
-  ensureCommonLibs();
-
-  const installed = readInstalled();
-  installed.forEach( ensureSimAndLibs );
-
-  log( 'install-all completed.' );
-}
-
-function pullAll() {
-  log( 'Pulling latest changes for all tracked repos...' );
-  installAll();
-  forEachTrackedRepo( ( repoPath, name ) => {
-    run( 'git', [ 'pull', '--ff-only' ], { cwd: repoPath }, `git pull failed in ${name}` );
-  } );
-}
-
-function pushAll() {
-  log( 'Pushing all tracked repos...' );
-  installAll();
-  forEachTrackedRepo( ( repoPath, name ) => {
-    run( 'git', [ 'push' ], { cwd: repoPath }, `git push failed in ${name}` );
-  } );
+  allZipRepos.forEach( ( repo ) => ensureZipRepo( repo ) );
+  log( `Done. Live repo: ${config.liveRepo}. Zip repos: ${Array.from( allZipRepos ).join( ', ' ) || 'none'}.` );
 }
 
 function statusAll() {
-  log( 'Status for all tracked repos:' );
-  installAll();
-  forEachTrackedRepo( ( repoPath, name ) => {
+  const gitRepos = findGitRepos();
+  if ( !gitRepos.length ) {
+    log( 'No live git repos found in repos/ (zip-only environment).' );
+    return;
+  }
+
+  gitRepos.forEach( ( repoPath ) => {
+    const name = path.basename( repoPath );
     log( `\n[${name}]` );
     run( 'git', [ 'status', '--short' ], { cwd: repoPath } );
   } );
 }
 
-function cleanAll() {
-  log( 'Discarding working copy changes for all tracked repos...' );
-  installAll();
-  forEachTrackedRepo( ( repoPath, name ) => {
-    run( 'git', [ 'reset', '--hard' ], { cwd: repoPath }, `git reset failed in ${name}` );
-    run( 'git', [ 'clean', '-fd' ], { cwd: repoPath }, `git clean failed in ${name}` );
+function pullAll() {
+  const gitRepos = findGitRepos();
+  if ( !gitRepos.length ) {
+    log( 'No live git repos to pull.' );
+    return;
+  }
+
+  gitRepos.forEach( ( repoPath ) => {
+    const name = path.basename( repoPath );
+    log( `Pulling ${name}...` );
+    run( 'git', [ 'pull', '--ff-only' ], { cwd: repoPath }, `git pull failed in ${name}` );
   } );
 }
 
-function ensureEntr() {
-  const hasEntr = spawnSync( 'sh', [ '-c', 'command -v entr' ], { stdio: 'ignore' } ).status === 0;
-  if ( hasEntr ) {
-    log( 'entr already available.' );
+function pushAll() {
+  const gitRepos = findGitRepos();
+  if ( !gitRepos.length ) {
+    log( 'No live git repos to push.' );
     return;
   }
 
-  const hasApt = spawnSync( 'sh', [ '-c', 'command -v apt-get' ], { stdio: 'ignore' } ).status === 0;
-  if ( !hasApt ) {
-    log( 'entr not found and apt-get not available; please install entr manually.' );
-    return;
-  }
-
-  log( 'Installing entr via apt-get (requires sudo)...' );
-  const update = spawnSync( 'sudo', [ 'apt-get', 'update' ], { stdio: 'inherit' } );
-  if ( update.status !== 0 ) {
-    log( 'apt-get update failed; please install entr manually.' );
-    return;
-  }
-  const install = spawnSync( 'sudo', [ 'apt-get', 'install', '-y', 'entr' ], { stdio: 'inherit' } );
-  if ( install.status !== 0 ) {
-    log( 'apt-get install entr failed; please install manually.' );
-    return;
-  }
-  log( 'entr installed.' );
+  gitRepos.forEach( ( repoPath ) => {
+    const name = path.basename( repoPath );
+    log( `Pushing ${name}...` );
+    run( 'git', [ 'push' ], { cwd: repoPath }, `git push failed in ${name}` );
+  } );
 }
 
-function ensureBaseRepos() {
-  ensureRepoWithInstall( CHIPPER );
-  ensureRepoWithInstall( PERENNIAL_REPO, PERENNIAL_ALIAS );
-}
-
-function ensureCommonLibs() {
-  const common = readChipperCommonLibs();
-  common.forEach( ( name ) => ensureRepoWithInstall( name ) );
-}
-
-function ensureSimAndLibs( simName ) {
-  ensureRepoWithInstall( simName );
-  const libs = readSimLibs( simName );
-  libs.forEach( ( name ) => ensureRepoWithInstall( name ) );
-}
-
-function ensureRepoWithInstall( repoName, destName = repoName ) {
+function ensureZipRepo( repoName, owner = DEFAULT_OWNER, destName = repoName ) {
   const dest = path.join( REPOS_DIR, destName );
-  if ( !fs.existsSync( dest ) ) {
-    const url = `https://github.com/phetsims/${repoName}.git`;
-    log( `Cloning ${repoName} into ${destName}...` );
-    run(
-      'git',
-      [ 'clone', '--depth=1', '--single-branch', url, dest ],
-      {},
-      `git clone failed for ${repoName}`
-    );
+  if ( fs.existsSync( dest ) ) {
+    log( `${destName} already present (zip).` );
+    return;
   }
 
-  npmInstall( dest, destName );
+  // Prefer archive URLs for reliability with anonymous downloads; fallback to zipball.
+  const candidates = [
+    `https://github.com/${owner}/${repoName}/archive/refs/heads/main.zip`,
+    `https://github.com/${owner}/${repoName}/archive/refs/heads/master.zip`,
+    `https://api.github.com/repos/${owner}/${repoName}/zipball/main`,
+    `https://api.github.com/repos/${owner}/${repoName}/zipball/master`
+  ];
+
+  const tmpRoot = fs.mkdtempSync( path.join( os.tmpdir(), 'umbrella-' ) );
+  const zipPath = path.join( tmpRoot, `${repoName}.zip` );
+  const extractDir = path.join( tmpRoot, 'extract' );
+  fs.mkdirSync( extractDir, { recursive: true } );
+
+  try {
+    let downloaded = false;
+    for ( const url of candidates ) {
+      log( `Downloading ${url}...` );
+      const result = spawnSync(
+        'curl',
+        [ '-fL', '-sS', '-A', 'umbrella-script', '-o', zipPath, url ],
+        { stdio: 'inherit' }
+      );
+      if ( result.status === 0 ) {
+        downloaded = true;
+        break;
+      }
+      log( `Download failed, trying next option...` );
+    }
+
+    if ( !downloaded ) {
+      exitWithError( `All download attempts failed for ${repoName}` );
+    }
+
+    run( 'unzip', [ '-q', zipPath, '-d', extractDir ], {}, `unzip failed for ${repoName}` );
+
+    const entries = fs.readdirSync( extractDir, { withFileTypes: true } ).filter( ( entry ) => entry.isDirectory() );
+    if ( !entries.length ) {
+      exitWithError( `Unexpected zip contents for ${repoName}` );
+    }
+
+    const unpacked = path.join( extractDir, entries[ 0 ].name );
+    fs.mkdirSync( path.dirname( dest ), { recursive: true } );
+    fs.rmSync( dest, { recursive: true, force: true } );
+    fs.renameSync( unpacked, dest );
+    log( `${destName} downloaded.` );
+  }
+  finally {
+    fs.rmSync( tmpRoot, { recursive: true, force: true } );
+  }
 }
 
-function npmInstall( dir, name ) {
-  const shouldInstall = name === CHIPPER || name === PERENNIAL_ALIAS;
-  if ( !shouldInstall ) {
-    log( `Skipping npm install in ${name || dir} (only ${CHIPPER} and ${PERENNIAL_ALIAS} get installs)` );
+function ensureLiveRepo( repoName, owner = DEFAULT_OWNER ) {
+  const dest = path.join( REPOS_DIR, repoName );
+  if ( fs.existsSync( path.join( dest, '.git' ) ) ) {
+    log( `${repoName} already present (git).` );
+    return;
+  }
+
+  fs.rmSync( dest, { recursive: true, force: true } );
+  const url = `https://github.com/${owner}/${repoName}.git`;
+  log( `Cloning ${url}...` );
+  run( 'git', [ 'clone', '--depth=1', '--single-branch', url, dest ], {}, `git clone failed for ${repoName}` );
+}
+
+function npmInstallIfNeeded( name ) {
+  const dir = path.join( REPOS_DIR, name );
+  if ( !fs.existsSync( dir ) ) {
     return;
   }
   if ( !fs.existsSync( path.join( dir, 'package.json' ) ) ) {
-    log( `Skipping npm install in ${name || dir} (no package.json)` );
+    log( `Skipping npm install in ${name} (no package.json).` );
     return;
   }
-  log( `Running npm install in ${name || dir}...` );
-  run( 'npm', [ 'install' ], { cwd: dir }, `npm install failed in ${name || dir}` );
+  if ( fs.existsSync( path.join( dir, 'node_modules' ) ) ) {
+    log( `npm install already completed in ${name}.` );
+    return;
+  }
+  log( `Running npm install in ${name}...` );
+  run( 'npm', [ 'install' ], { cwd: dir }, `npm install failed in ${name}` );
 }
 
-function readChipperCommonLibs() {
-  const buildPath = path.join( REPOS_DIR, CHIPPER, 'build.json' );
-  if ( !fs.existsSync( buildPath ) ) {
-    return [];
-  }
-  try {
-    const build = JSON.parse( fs.readFileSync( buildPath, 'utf8' ) );
-    return Array.isArray( build?.common?.phetLibs ) ? build.common.phetLibs : [];
-  }
-  catch( err ) {
-    log( `Could not parse chipper/build.json: ${err.message}` );
-    return [];
-  }
-}
-
-function readSimLibs( simName ) {
-  const pkgPath = path.join( REPOS_DIR, simName, 'package.json' );
-  if ( !fs.existsSync( pkgPath ) ) {
-    return [];
-  }
-  try {
-    const pkg = JSON.parse( fs.readFileSync( pkgPath, 'utf8' ) );
-    return Array.isArray( pkg?.phet?.phetLibs ) ? pkg.phet.phetLibs : [];
-  }
-  catch( err ) {
-    log( `Could not parse phetLibs for ${simName}: ${err.message}` );
-    return [];
-  }
-}
-
-function computeRequiredRepos( installedSims ) {
-  const required = new Set( [ CHIPPER, PERENNIAL_ALIAS ] );
-  readChipperCommonLibs().forEach( ( name ) => required.add( name ) );
-
-  installedSims.forEach( ( sim ) => {
-    required.add( sim );
-    readSimLibs( sim ).forEach( ( name ) => required.add( name ) );
-  } );
-
-  return required;
-}
-
-function pruneRepos( requiredSet ) {
+function findGitRepos() {
   if ( !fs.existsSync( REPOS_DIR ) ) {
-    return;
-  }
-
-  const entries = fs.readdirSync( REPOS_DIR, { withFileTypes: true } );
-  entries.forEach( ( entry ) => {
-    if ( !entry.isDirectory() ) {
-      return;
-    }
-    const name = entry.name;
-    if ( !requiredSet.has( name ) ) {
-      const target = path.join( REPOS_DIR, name );
-      log( `Pruning ${name}...` );
-      fs.rmSync( target, { recursive: true, force: true } );
-    }
-  } );
-}
-
-function forEachTrackedRepo( fn ) {
-  const required = computeRequiredRepos( readInstalled() );
-  required.forEach( ( name ) => {
-    const dir = path.join( REPOS_DIR, name );
-    if ( fs.existsSync( dir ) ) {
-      fn( dir, name );
-    }
-  } );
-}
-
-function ensureInstalledFile() {
-  if ( !fs.existsSync( INSTALLED_FILE ) ) {
-    fs.writeFileSync( INSTALLED_FILE, '[]' );
-  }
-}
-
-function readInstalled() {
-  try {
-    const data = fs.readFileSync( INSTALLED_FILE, 'utf8' );
-    const parsed = JSON.parse( data );
-    return Array.isArray( parsed ) ? parsed : [];
-  }
-  catch( err ) {
     return [];
   }
+
+  return fs.readdirSync( REPOS_DIR )
+    .map( ( entry ) => path.join( REPOS_DIR, entry ) )
+    .filter( ( fullPath ) => fs.existsSync( path.join( fullPath, '.git' ) ) );
 }
 
-function writeInstalled( list ) {
-  const unique = Array.from( new Set( list ) ).sort();
-  fs.writeFileSync( INSTALLED_FILE, JSON.stringify( unique, null, 2 ) );
+function loadManifest() {
+  if ( !fs.existsSync( SIMS_MANIFEST ) ) {
+    return new Map();
+  }
+
+  try {
+    const raw = fs.readFileSync( SIMS_MANIFEST, 'utf8' );
+    const parsed = JSON.parse( raw );
+    const sims = Array.isArray( parsed?.sims ) ? parsed.sims : [];
+    const map = new Map();
+    sims.forEach( ( entry ) => {
+      if ( entry?.sim ) {
+        map.set( entry.sim, {
+          sim: entry.sim,
+          liveRepo: entry.liveRepo || entry.sim,
+          deps: Array.isArray( entry.deps ) ? entry.deps : []
+        } );
+      }
+    } );
+    return map;
+  }
+  catch( err ) {
+    log( `Warning: could not read sims.json (${err.message}). Using defaults.` );
+    return new Map();
+  }
+}
+
+function resolveSimConfig( manifest, simName ) {
+  if ( manifest.has( simName ) ) {
+    return manifest.get( simName );
+  }
+  log( `Sim ${simName} not in sims.json; defaulting to liveRepo=${simName} with no deps.` );
+  return { sim: simName, liveRepo: simName, deps: [] };
 }
 
 function run( cmd, args, options = {}, errorMessage ) {

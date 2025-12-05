@@ -5,15 +5,11 @@
   "private": true,
   "license": "MIT",
   "scripts": {
-    "postinstall": "node scripts/manage.js install-all && node scripts/manage.js ensure-entr && node scripts/postinstall-message.js",
+    "postinstall": "node scripts/postinstall-message.js",
     "add-sim": "node scripts/manage.js add-sim",
-    "remove-sim": "node scripts/manage.js remove-sim",
-    "list-sims": "node scripts/manage.js list-sims",
-    "install-all": "node scripts/manage.js install-all",
-    "pull-all": "node scripts/manage.js pull-all",
-    "push-all": "node scripts/manage.js push-all",
-    "status-all": "node scripts/manage.js status-all",
-    "clean-all": "node scripts/manage.js clean-all",
+    "status": "node scripts/manage.js status",
+    "pull": "node scripts/manage.js pull",
+    "push": "node scripts/manage.js push",
     "start": "node scripts/start.js"
   },
   "keywords": [

@@ -1,10 +1,8 @@
 #!/usr/bin/env node
-console.log(`
+console.log( `
 Welcome to the PhET umbrella workspace!
 
-Next steps:
+Quick start:
   npm run add-sim -- circuit-construction-kit-dc
-  npm start
-
-The start command runs the chipper dev server and the perennial-alias watch-strings task for you.
-`);
+  npm start  # runs chipper dev-server + perennial-alias watch-strings
+` );

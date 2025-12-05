@@ -1,0 +1,14 @@
+{
+  "sims": [
+    {
+      "sim": "circuit-construction-kit-dc",
+      "liveRepo": "circuit-construction-kit-common",
+      "deps": []
+    },
+    {
+      "sim": "circuit-construction-kit-ac",
+      "liveRepo": "circuit-construction-kit-common",
+      "deps": []
+    }
+  ]
+}
